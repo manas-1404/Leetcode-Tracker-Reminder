@@ -120,7 +120,7 @@ async function dailyDBUpdate() {
     }
   }
 
-  for (const slug of recentSlugs) {
+  for (const slug of Array.from(recentSlugs)) {
     const fullUrl = `https://leetcode.com/problems/${slug}/`;
 
     const existing = await sql`
