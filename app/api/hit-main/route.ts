@@ -91,7 +91,7 @@ async function dailyDBUpdate() {
     query,
     variables: {
       username: process.env.LEETCODE_USERNAME,
-      limit: 10
+      limit: 30
     }
   };
 
@@ -112,17 +112,31 @@ async function dailyDBUpdate() {
 
   const submissions = data.data.recentAcSubmissionList;
 
+  const cutoff = Math.floor(Date.now() / 1000) - 86400;
+  const recentSlugs = new Set<string>();
   for (const sub of submissions) {
-    const fullUrl = `https://leetcode.com/problems/${sub.titleSlug}/`;
-    
+    if (parseInt(sub.timestamp) >= cutoff) {
+      recentSlugs.add(sub.titleSlug);
+    }
+  }
+
+  for (const slug of Array.from(recentSlugs)) {
+    const fullUrl = `https://leetcode.com/problems/${slug}/`;
+
     const existing = await sql`
       SELECT 1 FROM questions WHERE url = ${fullUrl}
     `;
-    
+
     if (existing.rows.length === 0) {
       await sql`
         INSERT INTO questions (url, numberofrevision, last_sent_date)
         VALUES (${fullUrl}, 0, NULL)
+      `;
+    } else {
+      await sql`
+        UPDATE questions
+        SET numberofrevision = numberofrevision + 1
+        WHERE url = ${fullUrl}
       `;
     }
   }
