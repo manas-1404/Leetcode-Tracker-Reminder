@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sql, getDb } from '@/lib/db';
 import {getRedis} from "@/lib/redis";
+
+interface Submission {
+  title: string;
+  titleSlug: string;
+  timestamp: string;
+}
 
 async function fetchQuestionFromDB() {
   const result = await sql`
@@ -110,21 +116,82 @@ async function dailyDBUpdate() {
     throw new Error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
   }
 
-  const submissions = data.data.recentAcSubmissionList;
+  const submissions: Submission[] = data.data.recentAcSubmissionList;
 
-  for (const sub of submissions) {
+  // Fetch today's emailed question URLs from Redis so we don't
+  // double-count them here — commit-question already handles those.
+  const emailedUrls = new Set<string>();
+  try {
+    const redis = getRedis();
+    // @ts-expect-error — @upstash/redis types mget with a tuple overload that
+    // doesn't accept a generic string type; the runtime behaviour is correct.
+    const [firstUrl, secondUrl] = await redis.mget<string>(
+      'first_question_url',
+      'second_question_url'
+    );
+    if (firstUrl) emailedUrls.add(firstUrl);
+    if (secondUrl) emailedUrls.add(secondUrl);
+  } catch {
+    // Redis unavailable — proceed without skipping emailed questions
+  }
+
+  // Only count submissions made within the past 24 hours to avoid
+  // re-incrementing the same problems on every subsequent cron run.
+  const oneDayAgo = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+
+  // Deduplicate submission URLs (a problem may appear multiple times);
+  // keep the first (most-recent) occurrence of each URL.
+  const seenUrls = new Set<string>();
+  const uniqueSubmissions = submissions.filter((sub) => {
     const fullUrl = `https://leetcode.com/problems/${sub.titleSlug}/`;
-    
-    const existing = await sql`
-      SELECT 1 FROM questions WHERE url = ${fullUrl}
-    `;
-    
-    if (existing.rows.length === 0) {
-      await sql`
-        INSERT INTO questions (url, numberofrevision, last_sent_date)
-        VALUES (${fullUrl}, 0, NULL)
-      `;
+    if (seenUrls.has(fullUrl)) return false;
+    seenUrls.add(fullUrl);
+    return true;
+  });
+
+  if (uniqueSubmissions.length === 0) return submissions;
+
+  const allUrls = uniqueSubmissions.map(
+    (sub) => `https://leetcode.com/problems/${sub.titleSlug}/`
+  );
+
+  // Single batch query to find which of these URLs already exist in the DB.
+  const db = getDb();
+  const existingResult = await db.query(
+    'SELECT url FROM questions WHERE url = ANY($1)',
+    [allUrls]
+  );
+  const existingUrls = new Set<string>(existingResult.rows.map((row: { url: string }) => row.url));
+
+  // Classify each URL into new problems to insert and existing ones to increment.
+  const urlsToInsert: string[] = [];
+  const urlsToIncrement: string[] = [];
+
+  for (const sub of uniqueSubmissions) {
+    const fullUrl = `https://leetcode.com/problems/${sub.titleSlug}/`;
+    if (!existingUrls.has(fullUrl)) {
+      urlsToInsert.push(fullUrl);
+    } else if (!emailedUrls.has(fullUrl) && Number(sub.timestamp) > oneDayAgo) {
+      // Already tracked, not one of today's emailed questions, and solved
+      // within the past 24 hours — increment its revision count.
+      urlsToIncrement.push(fullUrl);
     }
+  }
+
+  // Insert new problems one by one (at most 10, and each has a unique URL constraint).
+  for (const newUrl of urlsToInsert) {
+    await sql`
+      INSERT INTO questions (url, numberofrevision, last_sent_date)
+      VALUES (${newUrl}, 0, NULL)
+    `;
+  }
+
+  // Single batched UPDATE for all re-practiced questions.
+  if (urlsToIncrement.length > 0) {
+    await db.query(
+      'UPDATE questions SET numberofrevision = numberofrevision + 1 WHERE url = ANY($1)',
+      [urlsToIncrement]
+    );
   }
 
   return submissions;

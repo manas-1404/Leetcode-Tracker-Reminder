@@ -7,7 +7,7 @@ A serverless LeetCode practice tracker built with Next.js and deployed on Vercel
 - Fetches recent LeetCode submissions
 - Randomly selects questions for review
 - Sends email reminders via EmailJS
-- Tracks revision counts
+- Tracks revision counts — automatically increments `numberofrevision` for any already-tracked question the user re-solves on LeetCode (not just the 2 emailed ones)
 - Automated daily updates via Vercel Cron Jobs
 
 ## Setup
@@ -149,8 +149,8 @@ The daily update runs automatically at 9:00 AM UTC. To change the schedule, edit
 
 ## API Endpoints
 
-- `GET /api/hit-main?token=YOUR_TOKEN` - Fetch questions and send email
-- `GET /api/commit-question?token=YOUR_TOKEN&id1=X&id2=Y` - Update revision count
+- `GET /api/hit-main?token=YOUR_TOKEN` - Fetch new LeetCode submissions, insert unseen problems, auto-increment revision counts for re-practiced problems, then send the daily email
+- `GET /api/commit-question?token=YOUR_TOKEN&id1=X&id2=Y` - Manually confirm that the 2 emailed questions were solved (increments their revision count)
 - `GET /api/cron/daily-update` - Automated endpoint (called by Vercel Cron)
 
 ## Database Options
